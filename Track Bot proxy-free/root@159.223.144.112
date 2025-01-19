@@ -1,0 +1,110 @@
+import asyncio
+import threading
+from playwright.async_api import async_playwright
+import sys
+import json
+import time
+
+sys.stdout.reconfigure(encoding='utf-8')
+
+def run_browser(url, wait_time, repeat_count, headless):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(extract_and_play_tracks(url, wait_time, repeat_count, headless))
+
+async def extract_and_play_tracks(url, wait_time, repeat_count, headless):
+    async with async_playwright() as p:        
+        context_args = {
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/91.0",
+            "viewport": {"width": 1280, "height": 720},
+            "locale": "en-US",
+        }
+
+        browser = await p.firefox.launch(headless=headless)
+        context = await browser.new_context(**context_args)
+        page = await context.new_page()
+        await page.goto(url)
+        time.sleep(4)
+        await handle_cookie_popup(page)
+
+        for repeat_index in range(repeat_count):
+            print(f"Repeat: {repeat_index + 1}", flush=True)
+            
+            # Wait for tracks to load
+            await page.wait_for_selector('.list-cards .list-item')
+            tracks = await page.query_selector_all('.list-cards .list-item')
+            track_data = []
+            unique_track_names = set()
+
+            for track in tracks:
+                name_element = await track.query_selector('.item-title .name')
+                track_name = await name_element.inner_text() if name_element else "Unknown Track"
+                track_name = track_name.strip()
+                if track_name not in unique_track_names:
+                    unique_track_names.add(track_name)
+                    track_data.append((track, track_name))
+
+            for index, (track, track_name) in enumerate(track_data):
+                safe_track_name = track_name.encode('utf-8', errors='replace').decode('utf-8')
+                print(f"Playing track {index + 1}: {safe_track_name}", flush=True)
+                try:
+                    play_button = await track.query_selector('button.btn-play.no-scale.vb-list-view-play-button-cards')
+                    if play_button:
+                        await play_button.click()
+                        await asyncio.sleep(2)
+                        for _ in range(3):
+                            player_title_element = await page.query_selector('.player-content .playable-information .title .caption')
+                            current_playing_title = await player_title_element.inner_text() if player_title_element else None
+                            if current_playing_title == track_name:
+                                print(f"Successfully playing: {current_playing_title}", flush=True)
+                                await asyncio.sleep(wait_time)
+                                break
+                            else:
+                                print(f"Incorrect track playing: {current_playing_title}. Retrying...", flush=True)
+                                await play_button.click()
+                                await asyncio.sleep(wait_time)
+                except Exception as e:
+                    print(f"Error playing track {track_name}: {e}", flush=True)
+
+            # Refresh the page before the next repeat
+            await page.reload()
+            time.sleep(4)
+            print("Page refreshed for next repeat.", flush=True)
+
+        await browser.close()
+
+async def handle_cookie_popup(page):
+    try:
+        await page.wait_for_selector('#onetrust-accept-btn-handler', timeout=5000)
+        await page.click('#onetrust-accept-btn-handler')
+        print("Cookie popup handled.", flush=True)
+    except Exception as e:
+        print(f"No cookie popup found or could not be handled: {e}", flush=True)
+
+def main():
+    # Load input parameters from the config file
+    config_file_path = "/home/music_plays_bot/config.json"
+    try:
+        with open(config_file_path, 'r') as config_file:
+            config = json.load(config_file)
+            url = config.get("url")
+            wait_time = config.get("wait_time", 4)
+            repeat_count = config.get("repeat_count", 1)
+            headless = config.get("headless", True)
+    except FileNotFoundError:
+        print(f"Config file not found at {config_file_path}. Please ensure it exists.", flush=True)
+        return
+    except json.JSONDecodeError:
+        print(f"Error decoding JSON from {config_file_path}. Please check the file format.", flush=True)
+        return
+
+    run_browser(url, wait_time, repeat_count, headless)
+
+# Start the script
+if __name__ == "__main__":
+    # Log output to a file and console
+    log_file = open("/home/music_plays_bot/output.log", "a")
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+    main()
